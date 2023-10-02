@@ -1,17 +1,59 @@
 #---------------------------------------------------------------
+# GP3 Encrypted Storage Class
+#---------------------------------------------------------------
+resource "kubernetes_annotations" "gp2_default" {
+  annotations = {
+    "storageclass.kubernetes.io/is-default-class" : "false"
+  }
+  api_version = "storage.k8s.io/v1"
+  kind        = "StorageClass"
+  metadata {
+    name = "gp2"
+  }
+  force = true
+
+  depends_on = [module.eks]
+}
+
+resource "kubernetes_storage_class" "ebs_csi_encrypted_gp3_storage_class" {
+  metadata {
+    name = "gp3"
+    annotations = {
+      "storageclass.kubernetes.io/is-default-class" : "true"
+    }
+  }
+
+  storage_provisioner    = "ebs.csi.aws.com"
+  reclaim_policy         = "Delete"
+  allow_volume_expansion = true
+  volume_binding_mode    = "WaitForFirstConsumer"
+  parameters = {
+    fsType    = "xfs"
+    encrypted = true
+    type      = "gp3"
+  }
+
+  depends_on = [kubernetes_annotations.gp2_default]
+}
+#---------------------------------------------------------------
 # IRSA for EBS CSI Driver
 #---------------------------------------------------------------
+
 module "ebs_csi_driver_irsa" {
-  source                = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
-  version               = "~> 5.20"
-  role_name_prefix      = format("%s-%s-", local.name, "ebs-csi-driver")
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  version = "~> 5.20"
+
+  role_name_prefix = "${module.eks.cluster_name}-ebs-csi-driver-"
+
   attach_ebs_csi_policy = true
+
   oidc_providers = {
     main = {
       provider_arn               = module.eks.oidc_provider_arn
       namespace_service_accounts = ["kube-system:ebs-csi-controller-sa"]
     }
   }
+
   tags = local.tags
 }
 
@@ -48,17 +90,7 @@ module "eks_blueprints_addons" {
   #---------------------------------------
   # Kubernetes Add-ons
   #---------------------------------------
-  #---------------------------------------------------------------
-  # CoreDNS Autoscaler helps to scale for large EKS Clusters
-  #   Further tuning for CoreDNS is to leverage NodeLocal DNSCache -> https://kubernetes.io/docs/tasks/administer-cluster/nodelocaldns/
-  #---------------------------------------------------------------
-  enable_cluster_proportional_autoscaler = true
-  cluster_proportional_autoscaler = {
-    values = [templatefile("${path.module}/helm-values/coredns-autoscaler-values.yaml", {
-      target = "deployment/coredns"
-    })]
-    description = "Cluster Proportional Autoscaler for CoreDNS Service"
-  }
+
 
   #---------------------------------------
   # Metrics Server
@@ -69,17 +101,6 @@ module "eks_blueprints_addons" {
   }
 
   #---------------------------------------
-  # Cluster Autoscaler
-  #---------------------------------------
-  enable_cluster_autoscaler = true
-  cluster_autoscaler = {
-    values = [templatefile("${path.module}/helm-values/cluster-autoscaler-values.yaml", {
-      aws_region     = var.region,
-      eks_cluster_id = module.eks.cluster_name
-    })]
-  }
-
-  #---------------------------------------
   # Karpenter Autoscaler for EKS Cluster
   #---------------------------------------
   enable_karpenter                  = true
@@ -87,47 +108,6 @@ module "eks_blueprints_addons" {
   karpenter = {
     repository_username = data.aws_ecrpublic_authorization_token.token.user_name
     repository_password = data.aws_ecrpublic_authorization_token.token.password
-  }
-
-  #---------------------------------------
-  # CloudWatch metrics for EKS
-  #---------------------------------------
-  enable_aws_cloudwatch_metrics = true
-  aws_cloudwatch_metrics = {
-    values = [templatefile("${path.module}/helm-values/aws-cloudwatch-metrics-valyes.yaml", {})]
-  }
-
-  #---------------------------------------
-  # AWS for FluentBit - DaemonSet
-  #---------------------------------------
-  enable_aws_for_fluentbit = true
-  aws_for_fluentbit_cw_log_group = {
-    use_name_prefix   = false
-    name              = "/${local.name}/aws-fluentbit-logs" # Add-on creates this log group
-    retention_in_days = 30
-  }
-  aws_for_fluentbit = {
-    s3_bucket_arns = [
-      module.s3_bucket.s3_bucket_arn,
-      "${module.s3_bucket.s3_bucket_arn}/*}"
-    ]
-    values = [templatefile("${path.module}/helm-values/aws-for-fluentbit-values.yaml", {
-      region               = local.region,
-      cloudwatch_log_group = "/${local.name}/aws-fluentbit-logs"
-      s3_bucket_name       = module.s3_bucket.s3_bucket_id
-      cluster_name         = module.eks.cluster_name
-    })]
-  }
-
-  enable_aws_load_balancer_controller = true
-  aws_load_balancer_controller = {
-    chart_version = "1.5.4"
-  }
-
-  enable_ingress_nginx = true
-  ingress_nginx = {
-    version = "4.5.2"
-    values  = [templatefile("${path.module}/helm-values/nginx-values.yaml", {})]
   }
 
   #---------------------------------------
@@ -166,69 +146,22 @@ module "eks_blueprints_addons" {
 # Data on EKS Kubernetes Addons
 #---------------------------------------------------------------
 module "eks_data_addons" {
-  source  = "aws-ia/eks-data-addons/aws"
-  version = "~> 1.0" # ensure to update this to the latest/desired version
+  source = "/Users/mselj/doeks_works/dask/terraform-aws-eks-data-addons"
+  #version = "~> 1.0" # ensure to update this to the latest/desired version
 
   oidc_provider_arn = module.eks.oidc_provider_arn
 
-
-  #---------------------------------------------------------------
-  # Kubecost Add-on
-  #---------------------------------------------------------------
-  enable_kubecost = true
-  kubecost_helm_config = {
-    values              = [templatefile("${path.module}/helm-values/kubecost-values.yaml", {})]
-    repository_username = data.aws_ecrpublic_authorization_token.token.user_name
-    repository_password = data.aws_ecrpublic_authorization_token.token.password
+  enable_dask_operator = true
+  enable_daskhub       = true
+  daskhub_helm_config = {
+    values = [templatefile("${path.module}/helm-values/daskhub-values.yaml", {
+    })]
   }
-
 }
 
 #---------------------------------------
 # Karpenter Provisioners
 #---------------------------------------
-data "kubectl_path_documents" "karpenter_provisioners" {
-  pattern = "${path.module}/karpenter-provisioners/spark-*.yaml"
-  vars = {
-    azs            = local.region
-    eks_cluster_id = module.eks.cluster_name
-  }
-}
-
-resource "kubectl_manifest" "karpenter_provisioner" {
-  for_each  = toset(data.kubectl_path_documents.karpenter_provisioners.documents)
-  yaml_body = each.value
-
-  depends_on = [module.eks_blueprints_addons]
-}
-
-#tfsec:ignore:*
-module "s3_bucket" {
-  source  = "terraform-aws-modules/s3-bucket/aws"
-  version = "~> 3.0"
-
-  bucket_prefix = "${local.name}-spark-logs-"
-
-  # For example only - please evaluate for your environment
-  force_destroy = true
-
-  server_side_encryption_configuration = {
-    rule = {
-      apply_server_side_encryption_by_default = {
-        sse_algorithm = "AES256"
-      }
-    }
-  }
-
-  tags = local.tags
-}
-
-# Creating an s3 bucket prefix. Ensure you copy Spark History event logs under this path to visualize the dags
-resource "aws_s3_object" "this" {
-  bucket       = module.s3_bucket.s3_bucket_id
-  key          = "spark-event-logs/"
-  content_type = "application/x-directory"
-}
 
 #---------------------------------------------------------------
 # Grafana Admin credentials resources
